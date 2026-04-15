@@ -1,4 +1,3 @@
-#general AV dataloader can work with any dataset that has AV pairs
 import random
 import logging
 import soundfile as sf
@@ -48,8 +47,9 @@ class AVDataset(torch.utils.data.Dataset):
         self.win = cfg['stft_cfg']['win_size']
         self.compress = cfg['model_cfg']['compress_factor']
         self.sr = cfg['stft_cfg'].get('sampling_rate', 16000)
-        self.face_size = cfg['training_cfg'].get('face_size', 96)
-        self.fps = cfg['training_cfg'].get('video_fps', 25)
+        vis_cfg = cfg.get('visual_cfg', {})
+        self.face_size = vis_cfg.get('face_size', 96)
+        self.fps = vis_cfg.get('video_fps', 25)
         self.rir = RIRAugmentor(rir_json, rir_prob, self.sr) if rir_json else None
 
     def _get_noise(self, path):

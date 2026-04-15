@@ -1,9 +1,10 @@
 #LRS2 AV dataloader
-#Reference:
-#noise mixing:https://github.com/microsoft/MS-SNSD, https://github.com/microsoft/DNS-Challenge
-#visual degradation:https://github.com/ms-dot-k/AVSR
-#cocktail party:https://github.com/nguyenvulebinh/AVSRCocktail
-#energy normalization(baseline):https://github.com/RoyChao19477/SEMamba
+#Reference: 
+#https://github.com/microsoft/MS-SNSD
+#https://github.com/microsoft/DNS-Challenge
+#https://github.com/ms-dot-k/AVSR
+#https://github.com/nguyenvulebinh/AVSRCocktail
+#https://github.com/RoyChao19477/SEMamba
 import json
 import random
 import logging
@@ -38,7 +39,6 @@ def extract_audio(video_path, sr=16000):
         wav = resampler(wav.unsqueeze(0)).squeeze(0)
     return wav
 
-#[C,T,H,W] normalized to [0,1]
 def load_video_frames(video_path, start_sec=None, dur_sec=None, face_size=96, fps=25):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -55,7 +55,6 @@ def load_video_frames(video_path, start_sec=None, dur_sec=None, face_size=96, fp
         if not ret:
             break
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        #center crop to square before resize
         h, w = frame.shape[:2]
         d = min(h, w)
         frame = frame[(h - d) // 2:(h + d) // 2, (w - d) // 2:(w + d) // 2]
@@ -120,7 +119,6 @@ def apply_visual_degradation(video, fps=25, min_dur_ms=200, max_dur_ms=500):
         video[:, start:start + win_len] = curve * video[:, start:start + win_len] + (1.0 - curve) * frozen
     elif deg_type == 'lip_occlude':
         C, T, H, W = video.shape
-        #mouth region in face crop
         occ_top = int(H * random.uniform(0.45, 0.65))
         fill_val = random.uniform(0.2, 0.6)
         inv_curve = 1.0 - curve
@@ -145,7 +143,9 @@ class LRS2AVDataset(torch.utils.data.Dataset):
                  rir_json=None, rir_prob=0.3,
                  visual_degradation_prob=0.0,
                  modality_conflict_prob=0.0,
-                 cocktail_party_prob=0.0):
+                 cocktail_party_prob=0.0,
+                 cocktail_num_speakers=1,
+                 cocktail_mix_protocol='bernoulli'):
         self.entries = load_json(data_json)
         if noise_json:
             self.noise_paths = load_json(noise_json)
@@ -172,6 +172,8 @@ class LRS2AVDataset(torch.utils.data.Dataset):
         self.vis_deg_prob = visual_degradation_prob
         self.mod_conflict_prob = modality_conflict_prob
         self.cocktail_prob = cocktail_party_prob
+        self.cocktail_num = cocktail_num_speakers
+        self.cocktail_mix_protocol = cocktail_mix_protocol
 
     def _get_noise(self):
         path = random.choice(self.noise_paths)
@@ -253,35 +255,59 @@ class LRS2AVDataset(torch.utils.data.Dataset):
             except (RuntimeError, OSError) as e:
                 logger.warning(f"modality conflict failed: {e}")
 
-        #RIR applied to clean before noise mixing
         if self.rir:
             clean = self.rir(clean)
-        if self.noise_paths:
+
+        if self.cocktail_mix_protocol == 'raven' and self.cocktail_prob > 0:
+            r = random.random()
+            if r < 0.5:
+                n_spk = 1
+                add_env_noise = True
+            elif r < 0.75:
+                n_spk = 2
+                add_env_noise = False
+            else:
+                n_spk = 1
+                add_env_noise = False
+            do_cocktail = True
+        else:
+            n_spk = self.cocktail_num if hasattr(self, 'cocktail_num') else 1
+            add_env_noise = bool(self.noise_paths)
+            do_cocktail = self.cocktail_prob > 0 and random.random() < self.cocktail_prob
+
+        if add_env_noise and self.noise_paths:
             snr = random.uniform(self.snr_min, self.snr_max)
             noisy = mix_audio(clean, self._get_noise(), snr)
         else:
             noisy = clean.clone()
-        #cocktail on top of environmental noise
-        if self.cocktail_prob > 0 and self.split and random.random() < self.cocktail_prob:
-            int_idx = random.randint(0, len(self.entries) - 1)
-            int_entry = self.entries[int_idx]
-            if isinstance(int_entry, dict):
-                int_vpath = int_entry['video']
-            else:
-                int_vpath = int_entry
-            try:
-                int_audio = extract_audio(int_vpath, self.sr)
-                if int_audio.shape[0] > clean.shape[0]:
-                    i_start = random.randint(0, int_audio.shape[0] - clean.shape[0])
-                    int_audio = int_audio[i_start:i_start + clean.shape[0]]
-                elif int_audio.shape[0] < clean.shape[0]:
-                    pad_len = clean.shape[0] - int_audio.shape[0]
-                    int_audio = torch.nn.functional.pad(int_audio, (0, pad_len))
+
+        if do_cocktail:
+            interfering_sum = torch.zeros_like(clean)
+            for _ in range(n_spk):
+                int_idx = random.randint(0, len(self.entries) - 1)
+                int_entry = self.entries[int_idx]
+                if isinstance(int_entry, dict):
+                    int_vpath = int_entry['video']
+                else:
+                    int_vpath = int_entry
+                try:
+                    int_audio = extract_audio(int_vpath, self.sr)
+                    if int_audio.shape[0] > clean.shape[0]:
+                        i_start = random.randint(0, int_audio.shape[0] - clean.shape[0])
+                        int_audio = int_audio[i_start:i_start + clean.shape[0]]
+                    elif int_audio.shape[0] < clean.shape[0]:
+                        pad_len = clean.shape[0] - int_audio.shape[0]
+                        int_audio = torch.nn.functional.pad(int_audio, (0, pad_len))
+                    interfering_sum = interfering_sum + int_audio
+                except (RuntimeError, OSError) as e:
+                    logger.warning(f"cocktail mix failed: {e}")
+            if interfering_sum.abs().max() > 0:
                 snr_db = random.uniform(self.snr_min, self.snr_max)
-                noisy_cocktail = mix_audio(clean, int_audio, snr_db)
-                noisy = noisy + (noisy_cocktail - clean)
-            except (RuntimeError, OSError) as e:
-                logger.warning(f"cocktail mix failed: {e}")
+                clean_pow = torch.mean(clean ** 2) + 1e-10
+                int_pow = torch.mean(interfering_sum ** 2) + 1e-10
+                target_pow = clean_pow / 10 ** (snr_db / 10.0)
+                scale = torch.sqrt(target_pow / int_pow)
+                noisy = noisy + scale * interfering_sum
 
         clean = clean.unsqueeze(0)
         noisy = noisy.unsqueeze(0)

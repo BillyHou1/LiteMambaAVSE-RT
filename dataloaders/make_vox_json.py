@@ -1,4 +1,3 @@
-#VoxCeleb2 json lists, split dev into train+valid (Not used in the paper, for future work)
 import os
 import json
 import random

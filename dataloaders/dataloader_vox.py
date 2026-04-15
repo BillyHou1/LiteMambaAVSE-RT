@@ -1,4 +1,3 @@
-#VoxCeleb2 loader, face videos should already be cropped
 import random
 import logging
 import torch

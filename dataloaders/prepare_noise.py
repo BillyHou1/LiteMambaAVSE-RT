@@ -1,4 +1,3 @@
-#collecting noise data from given dirs split into train or valid
 import os
 import json
 import random

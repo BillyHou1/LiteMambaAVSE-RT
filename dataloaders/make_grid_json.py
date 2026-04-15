@@ -1,5 +1,3 @@
-#read GRID dataset and pair wav+mpg by speaker
-#Using s1-s28 train, s29-s31 valid, and s32-s34 to test
 import os
 import json
 import argparse
@@ -27,7 +25,6 @@ def collect_pairs(grid_root):
                 audio_paths[key] = full
             elif ext == '.mpg':
                 video_paths[key] = full
-    #only keep pairs that have both audio and video
     common = set(audio_paths) & set(video_paths)
     by_speaker = {}
     for key in common:

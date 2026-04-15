@@ -1,5 +1,5 @@
 #RIR convolution
-#References:
+#Reference: 
 #https://github.com/microsoft/DNS-Challenge
 #https://pytorch.org/audio/stable/tutorials/audio_data_augmentation_tutorial.html
 import json
@@ -19,11 +19,11 @@ def load_rir(path, target_sr=16000):
     return rir.astype(np.float32)
 
 def add_reverb(audio_np, rir_np):
-    reverbed = fftconvolve(audio_np, rir_np, mode='full')[:len(audio_np)]
+    rev = fftconvolve(audio_np, rir_np, mode='full')[:len(audio_np)]
     orig_rms = np.sqrt(np.mean(audio_np ** 2) + 1e-10)
-    rev_rms = np.sqrt(np.mean(reverbed ** 2) + 1e-10)
-    reverbed = reverbed * (orig_rms / rev_rms)
-    return reverbed.astype(np.float32)
+    rev_rms = np.sqrt(np.mean(rev ** 2) + 1e-10)
+    rev = rev * (orig_rms / rev_rms)
+    return rev.astype(np.float32)
 
 class RIRAugmentor:
     def __init__(self, rir_json, prob=0.3, target_sr=16000):
@@ -32,6 +32,7 @@ class RIRAugmentor:
         with open(rir_json, 'r') as f:
             self.rir_paths = json.load(f)
         self.cache = {}
+
     def _get_rir(self, idx):
         if idx not in self.cache:
             self.cache[idx] = load_rir(self.rir_paths[idx], self.target_sr)

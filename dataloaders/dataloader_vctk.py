@@ -1,4 +1,3 @@
-#VCTK DEMAND audio only dataloader from SEMamba baseline.
 import os
 import json
 import random
@@ -22,7 +21,6 @@ class VCTKDemandDataset(torch.utils.data.Dataset):
         random.seed(1234)
         if shuffle:
             random.shuffle(self.noisy_paths)
-        #map filename -> clean path so we can find the clean version of each noisy file
         self.clean_dict = {os.path.basename(p): p for p in clean_paths}
         self.sr = sampling_rate
         self.seg = segment_size

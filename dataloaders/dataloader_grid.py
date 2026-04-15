@@ -1,4 +1,3 @@
-#GRID dataset loader, reads wav and mpg pairs and mixes noise on the fly
 import random
 import logging
 import torch

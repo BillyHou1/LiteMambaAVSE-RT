@@ -1,4 +1,3 @@
-#helpers for GRID, VoxCeleb2, and custom datasets
 import json
 import os
 import random
@@ -18,7 +17,6 @@ def save_json(data, path):
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2)
 
-#[C,T,H,W] normalized to [0,1]
 def load_video_frames(video_path, start_sec=None, dur_sec=None, face_size=96, fps=25):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -35,7 +33,6 @@ def load_video_frames(video_path, start_sec=None, dur_sec=None, face_size=96, fp
         if not ret:
             break
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        #center crop to squares
         h, w = frame.shape[:2]
         d = min(h, w)
         frame = frame[(h - d) // 2:(h + d) // 2, (w - d) // 2:(w + d) // 2]
@@ -72,7 +69,6 @@ def mix_audio(clean, noise, snr_db):
     return clean + scale * noise
 
 def apply_visual_aug(frames):
-    #simple random visual corruption
     r = random.random()
     if r < 0.08:
         return torch.zeros_like(frames)
@@ -131,7 +127,6 @@ def apply_visual_degradation(video, fps=25, min_dur_ms=200, max_dur_ms=500):
         video[:, start:start + win_len] = curve * video[:, start:start + win_len] + (1.0 - curve) * frozen
     elif deg_type == 'lip_occlude':
         C, T, H, W = video.shape
-        #mouth region in face crop
         occ_top = int(H * random.uniform(0.45, 0.65))
         fill_val = random.uniform(0.2, 0.6)
         inv_curve = 1.0 - curve

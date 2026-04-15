@@ -1,4 +1,3 @@
-#read LRS2 split txt files and dump json lists
 import os
 import json
 import argparse
