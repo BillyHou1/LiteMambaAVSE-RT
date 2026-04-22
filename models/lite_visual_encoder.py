@@ -142,6 +142,27 @@ class ShuffleNetVisualEncoder(nn.Module):
                 break
         return self
 
+def _extract_spatial(self, video):
+    B, C, Tv, H, W = video.shape
+    gray = self._preprocess(video)
+    
+    if all(not p.requires_grad for p in self.frontend3D.parameters()):
+        with torch.no_grad():
+            x = self.frontend3D(gray)
+    else:
+        x = self.frontend3D(gray)
+        
+    _, C2, T2, H2, W2 = x.shape
+    x = x.permute(0, 2, 1, 3, 4).contiguous().view(B * T2, C2, H2, W2)
+    
+    if all(not p.requires_grad for p in self.trunk.parameters()):
+        with torch.no_grad():
+            x = self.trunk(x)
+    else:
+        x = self.trunk(x)
+        
+    return x.view(B, T2, -1).permute(0, 2, 1), T2
+    
     def _extract_spatial(self, video):
         B, C, Tv, H, W = video.shape
         gray = self._preprocess(video)
