@@ -1,0 +1,304 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+from pathlib import Path
+import os
+
+class ROIsExtractor:
+    
+    def __init__(self, static_image_mode=False, max_num_faces=1, min_detection_confidence=0.5):
+        self.mp_face_mesh = mp.solutions.face_mesh
+        self.face_mesh = self.mp_face_mesh.FaceMesh(
+            static_image_mode=static_image_mode,
+            max_num_faces=max_num_faces,
+            min_detection_confidence=min_detection_confidence,
+            min_tracking_confidence=0.5
+        )
+
+        lip_indices = set()
+        for edge in self.mp_face_mesh.FACEMESH_LIPS:
+            lip_indices.add(edge[0])
+            lip_indices.add(edge[1])
+        self.mouth_indices = sorted(list(lip_indices))
+        
+        self.smoothed_mouth_bbox = None
+        self.smoothed_face_bbox = None
+        self.alpha = 0.3
+        
+    def _get_face_bbox(self, landmarks, img_w, img_h):
+        x_coords = []
+        y_coords = []
+        for landmark in landmarks.landmark:
+            x_coords.append(landmark.x * img_w)
+            y_coords.append(landmark.y * img_h)
+        
+        x_min, x_max = min(x_coords), max(x_coords)
+        y_min, y_max = min(y_coords), max(y_coords)
+        
+        w = x_max - x_min
+        h = y_max - y_min
+        size = int(max(w, h) * 1.2)
+        cx = (x_min + x_max) / 2
+        cy = (y_min + y_max) / 2
+        x_min = int(cx - size / 2)
+        y_min = int(cy - size / 2)
+        x_max = int(cx + size / 2)
+        y_max = int(cy + size / 2)
+        
+        return (x_min, y_min, x_max, y_max)
+    
+    def _get_mouth_bbox(self, landmarks, img_w, img_h):
+        mouth_points = []
+        for idx in self.mouth_indices:
+            landmark = landmarks.landmark[idx]
+            px, py = landmark.x * img_w, landmark.y * img_h
+            mouth_points.append([px, py])
+        
+        mouth_points = np.array(mouth_points)
+        x_min, y_min = mouth_points.min(axis=0)
+        x_max, y_max = mouth_points.max(axis=0)
+        
+        w = x_max - x_min
+        h = y_max - y_min
+        scale = 1.6
+        w_expanded = w * scale
+        h_expanded = h * scale
+        
+        cx = (x_min + x_max) / 2
+        cy = (y_min + y_max) / 2
+        size = max(w_expanded, h_expanded)
+        
+        x_min = int(cx - size / 2)
+        y_min = int(cy - size / 2)
+        x_max = int(cx + size / 2)
+        y_max = int(cy + size / 2)
+        
+        return (x_min, y_min, x_max, y_max)
+    
+    def _smooth_bbox(self, bbox, bbox_type='mouth'):
+        if bbox_type == 'mouth':
+            smoothed_bbox = self.smoothed_mouth_bbox
+        else:
+            smoothed_bbox = self.smoothed_face_bbox
+        
+        if smoothed_bbox is None:
+            cx = (bbox[0] + bbox[2]) / 2
+            cy = (bbox[1] + bbox[3]) / 2
+            w = bbox[2] - bbox[0]
+            h = bbox[3] - bbox[1]
+            new_smoothed = (cx, cy, w, h)
+        else:
+            cx_old, cy_old, w_old, h_old = smoothed_bbox
+            cx_new = (bbox[0] + bbox[2]) / 2
+            cy_new = (bbox[1] + bbox[3]) / 2
+            w_new = bbox[2] - bbox[0]
+            h_new = bbox[3] - bbox[1]
+            
+            cx = self.alpha * cx_new + (1 - self.alpha) * cx_old
+            cy = self.alpha * cy_new + (1 - self.alpha) * cy_old
+            w = self.alpha * w_new + (1 - self.alpha) * w_old
+            h = self.alpha * h_new + (1 - self.alpha) * h_old
+            
+            new_smoothed = (cx, cy, w, h)
+        
+        if bbox_type == 'mouth':
+            self.smoothed_mouth_bbox = new_smoothed
+        else:
+            self.smoothed_face_bbox = new_smoothed
+        
+        x_min = int(cx - w/2)
+        y_min = int(cy - h/2)
+        x_max = int(cx + w/2)
+        y_max = int(cy + h/2)
+        
+        return (x_min, y_min, x_max, y_max)
+    
+    def _clip_bbox(self, bbox, img_w, img_h):
+        x_min, y_min, x_max, y_max = bbox
+        x_min = max(0, x_min)
+        y_min = max(0, y_min)
+        x_max = min(img_w - 1, x_max)
+        y_max = min(img_h - 1, y_max)
+        
+        if x_max <= x_min:
+            x_max = x_min + 1
+        if y_max <= y_min:
+            y_max = y_min + 1
+        
+        return (x_min, y_min, x_max, y_max)
+    
+    def _crop_and_resize(self, frame, bbox, target_size):
+        x1, y1, x2, y2 = bbox
+        roi = frame[y1:y2, x1:x2]
+        if roi.size == 0:
+            return np.zeros((target_size, target_size, 3), dtype=np.uint8)
+        return cv2.resize(roi, (target_size, target_size))
+    
+    def _random_crop_88(self, roi_96, offset=None):
+        if offset is not None:
+            top, left = offset
+        else:
+            top = np.random.randint(0, 96 - 88 + 1)
+            left = np.random.randint(0, 96 - 88 + 1)
+        
+        roi_88 = roi_96[top:top+88, left:left+88]
+        return roi_88
+    
+    def _center_crop_88(self, roi_96):
+        top = (96 - 88) // 2
+        left = (96 - 88) // 2
+        roi_88 = roi_96[top:top+88, left:left+88]
+        return roi_88
+    
+    def process_video(self, input_video_path, output_dir, mode='train'):
+        video_name = Path(input_video_path).stem
+        video_output_dir = Path(output_dir) / video_name
+        video_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        cap = cv2.VideoCapture(str(input_video_path))
+        if not cap.isOpened():
+            print(f"Error: Cannot open video {input_video_path}")
+            return None
+        
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        
+        outputs = {
+            'mouth_96': cv2.VideoWriter(str(video_output_dir / 'mouth_96.mp4'), fourcc, fps, (96, 96)),
+            'face_96': cv2.VideoWriter(str(video_output_dir / 'face_96.mp4'), fourcc, fps, (96, 96)),
+            'mouth_88': cv2.VideoWriter(str(video_output_dir / 'mouth_88.mp4'), fourcc, fps, (88, 88)),
+            'face_88': cv2.VideoWriter(str(video_output_dir / 'face_88.mp4'), fourcc, fps, (88, 88)),
+            'overlay_debug': cv2.VideoWriter(str(video_output_dir / 'overlay_debug.mp4'), fourcc, fps, (width, height))
+        }
+        
+        self.smoothed_mouth_bbox = None
+        self.smoothed_face_bbox = None
+        
+        #same crop offset for all frames in a video
+        if mode == 'train':
+            fixed_crop_offset = (
+                #top
+                np.random.randint(0, 96 - 88 + 1),  
+                #left
+                np.random.randint(0, 96 - 88 + 1)   
+            )
+        else:
+            fixed_crop_offset = None
+        
+        frame_idx = 0
+        
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = self.face_mesh.process(frame_rgb)
+            
+            mouth_bbox = None
+            face_bbox = None
+            
+            if results.multi_face_landmarks:
+                face_landmarks = results.multi_face_landmarks[0]
+                
+                mouth_bbox = self._get_mouth_bbox(face_landmarks, width, height)
+                face_bbox = self._get_face_bbox(face_landmarks, width, height)
+            
+            if mouth_bbox is not None:
+                mouth_bbox_smoothed = self._smooth_bbox(mouth_bbox, 'mouth')
+            elif self.smoothed_mouth_bbox is not None:
+                cx, cy, w, h = self.smoothed_mouth_bbox
+                mouth_bbox_smoothed = (int(cx - w/2), int(cy - h/2), int(cx + w/2), int(cy + h/2))
+            else:
+                cx, cy = width // 2, height // 2
+                default_size = min(width, height) // 4
+                mouth_bbox_smoothed = (cx - default_size//2, cy - default_size//2,
+                                       cx + default_size//2, cy + default_size//2)
+
+            if face_bbox is not None:
+                face_bbox_smoothed = self._smooth_bbox(face_bbox, 'face')
+            elif self.smoothed_face_bbox is not None:
+                cx, cy, w, h = self.smoothed_face_bbox
+                face_bbox_smoothed = (int(cx - w/2), int(cy - h/2), int(cx + w/2), int(cy + h/2))
+            else:
+                cx, cy = width // 2, height // 2
+                default_size = int(min(width, height) * 0.8)
+                face_bbox_smoothed = (cx - default_size//2, cy - default_size//2,
+                                      cx + default_size//2, cy + default_size//2)
+            
+            mouth_bbox_clipped = self._clip_bbox(mouth_bbox_smoothed, width, height)
+            face_bbox_clipped = self._clip_bbox(face_bbox_smoothed, width, height)
+
+            mouth_96 = self._crop_and_resize(frame, mouth_bbox_clipped, 96)
+            face_96 = self._crop_and_resize(frame, face_bbox_clipped, 96)
+
+            if mode == 'train':
+                mouth_88 = self._random_crop_88(mouth_96, offset=fixed_crop_offset)
+                face_88 = self._random_crop_88(face_96, offset=fixed_crop_offset)
+            else:
+                mouth_88 = self._center_crop_88(mouth_96)
+                face_88 = self._center_crop_88(face_96)
+            
+            outputs['mouth_96'].write(mouth_96)
+            outputs['face_96'].write(face_96)
+            outputs['mouth_88'].write(mouth_88)
+            outputs['face_88'].write(face_88)
+            
+            overlay_frame = frame.copy()
+            x1, y1, x2, y2 = mouth_bbox_clipped
+            cv2.rectangle(overlay_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(overlay_frame, 'Mouth', (x1, y1 - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            
+            x1, y1, x2, y2 = face_bbox_clipped
+            cv2.rectangle(overlay_frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+            cv2.putText(overlay_frame, 'Face', (x1, y1 - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+            
+            time_sec = frame_idx / fps if fps > 0 else 0
+            text = f'Frame: {frame_idx} | Time: {time_sec:.2f}s | FPS: {fps}'
+            cv2.putText(overlay_frame, text, (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            outputs['overlay_debug'].write(overlay_frame)
+            
+            frame_idx += 1
+        
+        cap.release()
+        for writer in outputs.values():
+            writer.release()
+        
+        print(f'Processed: {input_video_path} ({frame_idx} frames) -> {video_output_dir}')
+        
+        return {
+            'mouth_96': str(video_output_dir / 'mouth_96.mp4'),
+            'face_96': str(video_output_dir / 'face_96.mp4'),
+            'mouth_88': str(video_output_dir / 'mouth_88.mp4'),
+            'face_88': str(video_output_dir / 'face_88.mp4'),
+            'overlay_debug': str(video_output_dir / 'overlay_debug.mp4')
+        }
+    
+    def process_directory(self, input_dir, output_dir, mode='train', pattern='**/*.mp4'):
+        input_path = Path(input_dir)
+        video_files = list(input_path.glob(pattern))
+        
+        print(f'Found {len(video_files)} videos in {input_dir}')
+        
+        all_outputs = []
+        for i, video_file in enumerate(video_files, 1):
+            print(f'\n[{i}/{len(video_files)}] Processing: {video_file.name}')
+            outputs = self.process_video(str(video_file), output_dir, mode)
+            if outputs:
+                all_outputs.append(outputs)
+        
+        print(f'\nCompleted! Processed {len(all_outputs)} videos.')
+        return all_outputs
+
+if __name__ == '__main__':
+    extractor = ROIsExtractor()
+    print("ready")
+
